@@ -1,32 +1,19 @@
-// #![feature(generators)]
-use std::error::Error;
-use std::io::{stdout, Write};
-use std::{
-    cell::RefCell,
-    rc::Rc,
-};
-use std::collections::VecDeque;
-use async_openai::types::ChatCompletionRequestMessage;
+use async_openai::types::ChatCompletionRequestFunctionMessageArgs;
 use async_openai::{
-    types::{ChatCompletionRequestMessageArgs, CreateChatCompletionRequestArgs, Role, CreateChatCompletionStreamResponse},
+    types::{CreateChatCompletionRequestArgs, Role},
     Client,
 };
-use futures::StreamExt;
+use async_stream::stream as async_stream;
 use axum::{
-    extract::TypedHeader,
-    headers,
     response::sse::{Event, Sse},
     routing::get,
     Router,
 };
-use futures::stream::{self, Stream};
-use futures_util::{pin_mut, stream::StreamExt as __};
-use std::{convert::Infallible, net::SocketAddr, path::PathBuf, time::Duration};
-use tokio_stream::StreamExt as _;
+use axum_extra::{headers, TypedHeader};
+use futures::stream::Stream;
+use std::{convert::Infallible, path::PathBuf, time::Duration};
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use async_stream::stream as async_stream;
-use futures::{channel::mpsc, sink::SinkExt};
 
 #[tokio::main]
 async fn main() {
@@ -47,37 +34,32 @@ async fn main() {
         .route("/sse", get(sse_handler))
         .layer(TraceLayer::new_for_http());
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-    tracing::debug!("listening on {}", addr);
-    axum::Server::bind(&addr)
-        .serve(app.into_make_service())
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+    tracing::debug!("listening on {:?}", listener);
+    axum::serve(listener, app).await.unwrap();
 }
 
 async fn sse_handler(
-    TypedHeader(user_agent): TypedHeader<headers::UserAgent>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>>  {
+    TypedHeader(_user_agent): TypedHeader<headers::UserAgent>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let content = "tell me an interesting fact";
     let client = Client::new();
     let request = CreateChatCompletionRequestArgs::default()
         .model("gpt-3.5-turbo")
         .max_tokens(512_u16)
-        .messages([
-            ChatCompletionRequestMessageArgs::default()
-                .content(content)
-                .role(Role::User)
-                .build()
-                .unwrap()
-        ])
+        .messages(vec![ChatCompletionRequestFunctionMessageArgs::default()
+            .content(content)
+            .role(Role::User)
+            .build()
+            .unwrap()
+            .into()])
         .build()
         .unwrap();
 
-    
     let mut stream /* : impl Stream<Item = Result<CreateChatCompletionStreamResponse, async_openapi::error::OpenAIError>> */
         = client.chat().create_stream(request).await.unwrap();
 
-    let stream_responder = Box::pin(async_stream! { 
+    let stream_responder = Box::pin(async_stream! {
         while let Some(result) = futures_util::stream::StreamExt::next(&mut stream).await {
             let response = result.unwrap();
             for chat_choice in response.choices.into_iter() {
@@ -89,12 +71,10 @@ async fn sse_handler(
             }
         }
     }); // as Pin<Box<dyn Stream<Item = Result<Event, _> + Send>;
-        
-        
+
     Sse::new(stream_responder).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(Duration::from_secs(1))
             .text("keep-alive-text"),
     )
 }
-
